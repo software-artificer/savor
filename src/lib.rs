@@ -1,25 +1,47 @@
 use std::{fmt, io, time};
 
+/// The error type for all MP4 parsing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum ParseError {
+    /// Returned when the input stream fails to provide the current cursor position.
     #[error("Failed to read current stream position")]
     CurrentStreamPosition(#[source] io::Error),
+
+    /// Returned when an atom has an invalid size field: either a standard (2–7 bytes) or an
+    /// extended (under 16 bytes).
     #[error("Atom size must be at least {0} bytes, got: {0}")]
     AtomSize(u64, u64),
+
+    /// Returned when an input stream seek operation fails.
     #[error("Failed to seek the stream")]
     Seek(#[source] io::Error),
+
+    /// Returned when reading from the input stream fails.
     #[error("Failed to read the data from the stream")]
     Read(#[source] io::Error),
+
+    /// Returned when an atom has an unsupported version field.
     #[error("Unsupported atom version {0} for {1}")]
     AtomVersion(u8, AtomType),
+
+    /// Returned when a child atom's bounds exceed those of its parent.
     #[error("The size of {0} atom extends beyond its parent")]
     SizeOverlap(AtomType),
+
+    /// Returned when a required child atom of a specific type is missing.
     #[error("Unable to find a {0} atom")]
     MissingAtom(AtomType),
+
+    /// Returned when multiple atoms of a specific type are found where only one is expected.
     #[error("Found duplicate atom type {0}")]
     DuplicateAtom(AtomType),
-    #[error("Overflow ocurred while calculating offset for atom {0}")]
+
+    /// Returned on arithmetic overflow or division by zero during atom property calculations.
+    #[error("Overflow occurred while calculating offset for atom {0}")]
     MathError(AtomType),
+
+    /// Returned when the time-to-sample (stts) table is empty, possibly indicating a fragmented
+    /// stream.
     #[error("The stts atom contained 0 samples, possibly a fragmented file")]
     Fragmented,
 }
