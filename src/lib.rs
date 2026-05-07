@@ -53,6 +53,7 @@ enum Size {
     EndOfStream(u64),
 }
 
+/// Represents an atom's size, covering standard, extended, or end-of-stream values.
 #[derive(Copy, Clone, Debug)]
 pub struct AtomSize(Size);
 
@@ -78,10 +79,20 @@ impl From<AtomSize> for u64 {
     }
 }
 
+/// Returned when an atom's size field is invalid or requires additional processing.
 #[derive(Debug)]
 pub enum SizeError {
+    /// Internal variant used when the atom size must be read from the extended size field.
+    /// This is handled by the parser and never returned to the caller.
     Extended,
+    /// Indicates the atom's size field value is too small.
+    ///
+    /// - A standard 32-bit size field must be at least 8 bytes (4 for size, 4 for type).
+    /// - An extended 64-bit size field must be at least 16 bytes (4 for size set to 1, 4 for type,
+    ///   and 8 for the extended field).
     TooSmall(u64),
+    /// Internal variant used for atoms spanning until the end of the stream.
+    /// This is handled by the parser and never returned to the caller.
     EndOfStream,
 }
 
@@ -120,19 +131,32 @@ impl fmt::Display for AtomSize {
     }
 }
 
+/// Represents the four-byte identifier of an atom type.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AtomType {
+    /// Represents atoms of types not explicitly handled by the parser.
     Other([u8; 4]),
+    /// Represents the `moov` (movie atom) box.
     Moov,
+    /// Represents the `mvhd` (movie header atom) box.
     Mvhd,
+    /// Represents the `trak` (track atom) box.
     Trak,
+    /// Represents the `udta` (user data atom) box.
     Udta,
+    /// Represents the `mdia` (media atom) box.
     Mdia,
+    /// Represents the `tkhd` (track header atom) box.
     Tkhd,
+    /// Represents the `hdlr` (media handler type atom) box.
     Hdlr,
+    /// Represents the `minf` (media information atom) box.
     Minf,
+    /// Represents the `stbl` (sample table atom) box.
     Stbl,
+    /// Represents the `stts` (time-to-sample atom) box.
     Stts,
+    /// Represents the `mdhd` (media header atom) box.
     Mdhd,
 }
 
@@ -198,6 +222,9 @@ impl AtomBounds {
     }
 }
 
+/// Represents an atom header's type and size alongside its recorded stream position.
+///
+/// The size encompasses standard, extended, and end-of-stream variants.
 #[derive(Copy, Clone)]
 #[cfg_attr(test, derive(Debug))]
 pub struct AtomHeader {
