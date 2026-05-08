@@ -595,6 +595,7 @@ impl MoovAtomBuilder {
     }
 }
 
+/// Represents the `moov` (movie atom) box, a container for all metadata.
 #[cfg_attr(test, derive(Debug))]
 pub struct MoovAtom {
     _bounds: AtomBounds,
@@ -604,10 +605,12 @@ pub struct MoovAtom {
 }
 
 impl MoovAtom {
+    /// Returns the media duration.
     pub fn duration(&self) -> time::Duration {
         self.mvhd.duration()
     }
 
+    /// Returns the video resolution in pixels.
     pub fn resolution(&self) -> (u32, u32) {
         self.trak.resolution()
     }
@@ -653,15 +656,18 @@ impl MoovAtom {
         MoovAtomBuilder::default()
     }
 
+    /// Returns the calculated average FPS (frames per second).
     pub fn fps(&self) -> Result<u64, ParseError> {
         self.trak.fps()
     }
 
+    /// Returns the child `udta` (user data atom) box, if present.
     pub fn udta(&self) -> Option<&UdtaAtom> {
         self.udta.as_ref()
     }
 }
 
+/// Represents the `udta` (user data atom) box, allowing for the parsing of arbitrary child atoms.
 #[cfg_attr(test, derive(Debug))]
 pub struct UdtaAtom {
     bounds: AtomBounds,
@@ -675,6 +681,13 @@ impl UdtaAtom {
         }
     }
 
+    /// Finds all child atoms of the specified type within the `udta` atom boundaries by parsing
+    /// the provided stream.
+    ///
+    /// Under the hood this simply delegates to the [AtomHeader::find_children()] implementation.
+    ///
+    /// # Errors
+    /// - Returns [ParseError] if parsing fails.
     pub fn find_children<S: io::Read + io::Seek>(
         &self,
         atom_type: AtomType,
@@ -683,6 +696,15 @@ impl UdtaAtom {
         self.header().find_children(stream, atom_type)
     }
 
+    /// Finds a child atom of the specified type within the `udta` atom boundaries by parsing the
+    /// provided stream.
+    ///
+    /// Under the hood this simply delegates to the [AtomHeader::find_child()] implementation.
+    ///
+    /// # Errors
+    /// - Returns [ParseError] if parsing fails.
+    /// - Returns [ParseError::DuplicateAtom] if more than one child of the requested type is
+    ///   found.
     pub fn find_child<S: io::Read + io::Seek>(
         &self,
         atom_type: AtomType,
@@ -1165,6 +1187,12 @@ impl HdlrAtom {
     }
 }
 
+/// Parses the stream to extract the `moov` (movie atom) box and its descendant atoms.
+///
+/// This is the primary entry point for the parser.
+///
+/// # Errors
+/// - Returns [ParseError] if parsing fails.
 pub fn parse<T: io::Read + io::Seek>(stream: &mut T) -> Result<MoovAtom, ParseError> {
     let moov_header = loop {
         let atom = AtomHeader::parse_from_stream(stream)?;
