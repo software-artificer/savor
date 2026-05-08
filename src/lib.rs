@@ -303,6 +303,13 @@ impl AtomHeader {
         Ok(result)
     }
 
+    /// Finds a child atom of the specified type within the current atom's boundaries by parsing
+    /// the provided stream.
+    ///
+    /// # Errors
+    /// - Returns [ParseError] if parsing fails.
+    /// - Returns [ParseError::DuplicateAtom] if more than one child of the requested type is
+    ///   found.
     pub fn find_child<S: io::Read + io::Seek>(
         &self,
         stream: &mut S,
@@ -321,6 +328,13 @@ impl AtomHeader {
         })
     }
 
+    /// Finds all child atoms of the specified type within the current atom's boundaries by parsing
+    /// the provided stream.
+    ///
+    /// Returns an empty vector if no matching atoms are found.
+    ///
+    /// # Errors
+    /// - Returns [ParseError] if parsing fails.
     pub fn find_children<S: io::Read + io::Seek>(
         &self,
         stream: &mut S,
@@ -349,20 +363,26 @@ impl AtomHeader {
             .ok_or(ParseError::MathError(self.atom_type))
     }
 
+    /// Returns the atom's content size, excluding the size field, type identifier, and extended
+    /// size field (if present).
     pub fn content_size(&self) -> u64 {
         self.bounds.content_size()
     }
 
+    /// Returns the atom's content poisition, excluding the size field, type identifier, and
+    /// extended size field (if present).
     pub fn content_position(&self) -> Result<u64, ParseError> {
         self.bounds
             .content_position()
             .ok_or(ParseError::MathError(self.atom_type))
     }
 
+    /// Returns the recorded position of the atom within the stream.
     pub fn position(&self) -> u64 {
         self.bounds.position
     }
 
+    /// Returns the total size of the atom, including the header.
     pub fn size(&self) -> AtomSize {
         self.bounds.size
     }
