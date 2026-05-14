@@ -60,8 +60,8 @@ pub struct AtomSize(Size);
 impl AtomSize {
     fn header_offset(&self) -> u64 {
         match self.0 {
-            Size::Standard(_) | Size::EndOfStream(_) => 8,
             Size::Extended(_) => 16,
+            _ => 8,
         }
     }
 
@@ -634,9 +634,11 @@ impl MoovAtom {
 
                         builder.trak(trak)
                     }
-                    AtomType::Udta => builder.udta(UdtaAtom {
-                        bounds: atom.bounds,
-                    }),
+                    AtomType::Udta => {
+                        let udta = UdtaAtom::parse_from_stream(atom, stream)?;
+
+                        builder.udta(udta)
+                    }
                     _ => {
                         tracing::debug!(
                             atom_type = ?atom.atom_type,
@@ -670,47 +672,34 @@ impl MoovAtom {
 /// Represents the `udta` (user data atom) box, allowing for the parsing of arbitrary child atoms.
 #[cfg_attr(test, derive(Debug))]
 pub struct UdtaAtom {
-    bounds: AtomBounds,
+    _bounds: AtomBounds,
+    children: Vec<AtomHeader>,
 }
 
 impl UdtaAtom {
-    fn header(&self) -> AtomHeader {
-        AtomHeader {
-            bounds: self.bounds,
-            atom_type: AtomType::Udta,
-        }
+    /// Finds all immediate child atoms of the specified type within the `udta` atom boundaries.
+    pub fn find_children(&self, atom_type: AtomType) -> Vec<AtomHeader> {
+        self.children
+            .iter()
+            .filter(|&child| child.atom_type == atom_type)
+            .copied()
+            .collect()
     }
 
-    /// Finds all child atoms of the specified type within the `udta` atom boundaries by parsing
-    /// the provided stream.
-    ///
-    /// Under the hood this simply delegates to the [AtomHeader::find_children()] implementation.
-    ///
-    /// # Errors
-    /// - Returns [ParseError] if parsing fails.
-    pub fn find_children<S: io::Read + io::Seek>(
-        &self,
-        atom_type: AtomType,
+    fn parse_from_stream<S: io::Read + io::Seek>(
+        header: AtomHeader,
         stream: &mut S,
-    ) -> Result<Vec<AtomHeader>, ParseError> {
-        self.header().find_children(stream, atom_type)
-    }
+    ) -> Result<Self, ParseError> {
+        let children = header.parse_container(vec![], stream, |mut children, atom, _| {
+            children.push(atom);
 
-    /// Finds a child atom of the specified type within the `udta` atom boundaries by parsing the
-    /// provided stream.
-    ///
-    /// Under the hood this simply delegates to the [AtomHeader::find_child()] implementation.
-    ///
-    /// # Errors
-    /// - Returns [ParseError] if parsing fails.
-    /// - Returns [ParseError::DuplicateAtom] if more than one child of the requested type is
-    ///   found.
-    pub fn find_child<S: io::Read + io::Seek>(
-        &self,
-        atom_type: AtomType,
-        stream: &mut S,
-    ) -> Result<Option<AtomHeader>, ParseError> {
-        self.header().find_child(stream, atom_type)
+            Ok(children)
+        })?;
+
+        Ok(Self {
+            _bounds: header.bounds,
+            children,
+        })
     }
 }
 
@@ -1379,10 +1368,26 @@ mod tests {
 
     fn get_mock_udta_atom(position: u64) -> UdtaAtom {
         UdtaAtom {
-            bounds: AtomBounds {
+            _bounds: AtomBounds {
                 position,
                 size: AtomSize(Size::Standard(768)),
             },
+            children: vec![
+                AtomHeader {
+                    bounds: AtomBounds {
+                        position: position + 8,
+                        size: AtomSize(Size::Standard(250)),
+                    },
+                    atom_type: AtomType::Other([b't', b'e', b's', b't']),
+                },
+                AtomHeader {
+                    bounds: AtomBounds {
+                        position: position + 264,
+                        size: AtomSize(Size::Standard(510)),
+                    },
+                    atom_type: AtomType::Other([b'd', b'e', b'm', b'o']),
+                },
+            ],
         }
     }
 
@@ -5994,6 +5999,169 @@ mod tests {
                     return a valid version 0 'mdhd' atom from the provided stream.\n\nExpected: \
                     Ok(MdhdAtom {{ bounds: AtomBounds {{ position: 8311, size: \
                     AtomSize(Standard(44)) }}, timescale: 16640 }})\nGot:      {res:?}",
+            );
+        }
+    }
+
+    mod udta_atom {
+        use super::{
+            super::ParseError, AtomBounds, AtomHeader, AtomSize, AtomType, Size, TestStream,
+            UdtaAtom,
+        };
+        use std::io;
+
+        fn get_mock_udta_atom<OnRead>(on_read: OnRead) -> impl io::Read + io::Seek
+        where
+            OnRead: Fn(&mut io::Cursor<Vec<u8>>) -> io::Result<()>,
+        {
+            let data = vec![
+                0, 0, 0, 0, // moov size
+                109, 111, 111, 118, // atom type: moov
+                0, 0, 0, 46, // udta size
+                117, 100, 116, 97, // atom type: udta
+                0, 0, 0, 20, // test atom size
+                116, 101, 115, 116, // atom type: test
+                72, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 33, // Hello world!
+                0, 0, 0, 18, // name atom size
+                110, 97, 109, 101, // atom type: name
+                84, 101, 115, 116, 32, 109, 101, 100, 105, 97, // Test media
+            ];
+            let stream = io::Cursor::new(data);
+
+            TestStream { stream, on_read }
+        }
+
+        #[test]
+        fn parse_from_stream_fails_on_child_read() {
+            let mut stream = get_mock_udta_atom(|stream| {
+                (stream.position() != 16)
+                    .then_some(())
+                    .ok_or(io::Error::other("udta child read error"))
+            });
+
+            let res = UdtaAtom::parse_from_stream(
+                AtomHeader {
+                    bounds: AtomBounds {
+                        position: 8,
+                        size: AtomSize(Size::Standard(46)),
+                    },
+                    atom_type: AtomType::Udta,
+                },
+                &mut stream,
+            );
+
+            assert!(
+                matches!(
+                    res,
+                    Err(ParseError::Read(ref e)) if e.kind() == io::ErrorKind::Other &&
+                        e.to_string() == "udta child read error",
+                ),
+                "UdtaAtom::parse_from_stream() returned an invalid value.\nThe parser should fail \
+                    when the 'udta' child atoms cannot be read.\n\nExpected: Err(Read(Custom {{ \
+                    kind: Other, error: \"udta child read error\" }}))\nGot:      {res:?}",
+            );
+        }
+
+        #[test]
+        fn parse_from_valid_stream_returns_udta_atom() {
+            let mut stream = get_mock_udta_atom(|_| Ok(()));
+
+            let res = UdtaAtom::parse_from_stream(
+                AtomHeader {
+                    bounds: AtomBounds {
+                        position: 8,
+                        size: AtomSize(Size::Standard(46)),
+                    },
+                    atom_type: AtomType::Udta,
+                },
+                &mut stream,
+            );
+
+            assert!(
+                matches!(
+                    &res,
+                    Ok(UdtaAtom {
+                        _bounds: AtomBounds {
+                            position: 8,
+                            size: AtomSize(Size::Standard(46)),
+                        },
+                        children
+                    }) if children.len() == 2,
+                ),
+                "UdtaAtom::parse_from_stream() returned an invalid value.\nParsing failed to \
+                    return a valid 'udta' atom with two children from the provided stream.\n\n\
+                    Expected: Ok(UdtaAtom {{ bounds: AtomBounds {{ position: 8, size: \
+                    AtomSize(Standard(46)) }}, children: [AtomHeader {{ .. }}, AtomHeader {{ .. }}\
+                    ] }})\nGot:      {res:?}",
+            );
+        }
+
+        #[test]
+        fn find_children_returns_empty_collection_if_no_children_found() {
+            let udta = UdtaAtom {
+                _bounds: AtomBounds {
+                    position: 48,
+                    size: AtomSize(Size::Standard(46)),
+                },
+                children: vec![
+                    AtomHeader {
+                        bounds: AtomBounds {
+                            position: 56,
+                            size: AtomSize(Size::Standard(20)),
+                        },
+                        atom_type: AtomType::Other([b't', b'e', b's', b't']),
+                    },
+                    AtomHeader {
+                        bounds: AtomBounds {
+                            position: 76,
+                            size: AtomSize(Size::Standard(18)),
+                        },
+                        atom_type: AtomType::Other([b'n', b'a', b'm', b'e']),
+                    },
+                ],
+            };
+
+            let res = udta.find_children(AtomType::Other([b'i', b'n', b'f', b'o']));
+
+            assert!(
+                res.is_empty(),
+                "UdtaAtom::find_children() returned an invalid value.\nExpected an empty \
+                    collection when child atoms of type 'info' aren't present.",
+            );
+        }
+
+        #[test]
+        fn find_children_returns_all_children_of_requested_type() {
+            let udta = UdtaAtom {
+                _bounds: AtomBounds {
+                    position: 48,
+                    size: AtomSize(Size::Standard(46)),
+                },
+                children: vec![
+                    AtomHeader {
+                        bounds: AtomBounds {
+                            position: 56,
+                            size: AtomSize(Size::Standard(20)),
+                        },
+                        atom_type: AtomType::Other([b't', b'e', b's', b't']),
+                    },
+                    AtomHeader {
+                        bounds: AtomBounds {
+                            position: 76,
+                            size: AtomSize(Size::Standard(18)),
+                        },
+                        atom_type: AtomType::Other([b't', b'e', b's', b't']),
+                    },
+                ],
+            };
+
+            let res = udta.find_children(AtomType::Other([b't', b'e', b's', b't']));
+
+            assert_eq!(
+                2,
+                res.len(),
+                "UdtaAtom::find_children() returned an invalid value.\nExpected two child atoms of \
+                    type 'test' to be returned.",
             );
         }
     }
