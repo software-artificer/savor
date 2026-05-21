@@ -544,7 +544,10 @@ struct MoovAtomBuilder {
 }
 
 impl MoovAtomBuilder {
-    fn build(self, bounds: AtomBounds) -> Result<MoovAtom, ParseError> {
+    fn build<T>(self, bounds: AtomBounds, stream: T) -> Result<MoovAtom<T>, ParseError>
+    where
+        T: io::Read + io::Seek,
+    {
         let mvhd = self.mvhd.ok_or(ParseError::MissingAtom(AtomType::Mvhd))?;
 
         let trak = self.trak.ok_or(ParseError::MissingAtom(AtomType::Trak))?;
@@ -556,6 +559,7 @@ impl MoovAtomBuilder {
             trak,
             mvhd,
             udta,
+            _stream: stream,
         })
     }
 
@@ -596,15 +600,18 @@ impl MoovAtomBuilder {
 }
 
 /// Represents the `moov` (movie atom) box, a container for all metadata.
-#[cfg_attr(test, derive(Debug))]
-pub struct MoovAtom {
+pub struct MoovAtom<S> {
     _bounds: AtomBounds,
     mvhd: MvhdAtom,
     trak: TrakVideAtom,
     udta: Option<UdtaAtom>,
+    _stream: S,
 }
 
-impl MoovAtom {
+impl<S> MoovAtom<S>
+where
+    S: io::Read + io::Seek,
+{
     /// Returns the media duration.
     pub fn duration(&self) -> time::Duration {
         self.mvhd.duration()
@@ -615,14 +622,11 @@ impl MoovAtom {
         self.trak.resolution()
     }
 
-    fn parse_from_stream<T: io::Read + io::Seek>(
-        header: AtomHeader,
-        stream: &mut T,
-    ) -> Result<Self, ParseError> {
+    fn parse_from_stream(header: AtomHeader, mut stream: S) -> Result<Self, ParseError> {
         header
             .parse_container(
                 Self::builder(),
-                stream,
+                &mut stream,
                 |builder, atom, stream| match atom.atom_type {
                     AtomType::Mvhd => {
                         let mvhd = MvhdAtom::parse_from_stream(atom.bounds, stream)?;
@@ -651,7 +655,7 @@ impl MoovAtom {
                     }
                 },
             )?
-            .build(header.bounds)
+            .build(header.bounds, stream)
     }
 
     fn builder() -> MoovAtomBuilder {
@@ -1182,9 +1186,9 @@ impl HdlrAtom {
 ///
 /// # Errors
 /// - Returns [ParseError] if parsing fails.
-pub fn parse<T: io::Read + io::Seek>(stream: &mut T) -> Result<MoovAtom, ParseError> {
+pub fn parse<T: io::Read + io::Seek>(mut stream: T) -> Result<MoovAtom<T>, ParseError> {
     let moov_header = loop {
-        let atom = AtomHeader::parse_from_stream(stream)?;
+        let atom = AtomHeader::parse_from_stream(&mut stream)?;
 
         if let AtomType::Moov = atom.atom_type {
             break atom;
@@ -1197,7 +1201,7 @@ pub fn parse<T: io::Read + io::Seek>(stream: &mut T) -> Result<MoovAtom, ParseEr
             "Ignoring irrelevant atom",
         );
 
-        atom.skip(stream)?;
+        atom.skip(&mut stream)?;
     };
 
     MoovAtom::parse_from_stream(moov_header, stream)
@@ -1209,9 +1213,26 @@ mod tests {
         AtomBounds, AtomHeader, AtomSize, AtomType, HdlrAtom, MdhdAtom, MdiaAtom, MinfAtom,
         MvhdAtom, Size, StblAtom, SttsAtom, TkhdAtom, TrakVideAtom, UdtaAtom,
     };
-    use std::io::{self, Read as _, Seek, Write as _};
+    use std::{
+        any, fmt,
+        io::{self, Read as _, Seek, Write as _},
+    };
+
+    #[cfg(test)]
+    impl<S> fmt::Debug for super::MoovAtom<S> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("MoovAtom")
+                .field("_bounds", &self._bounds)
+                .field("mvhd", &self.mvhd)
+                .field("trak", &self.trak)
+                .field("udta", &self.udta)
+                .field("_stream", &any::type_name::<S>())
+                .finish()
+        }
+    }
 
     mockall::mock! {
+        #[derive(Debug)]
         Stream {}
 
         impl io::Read for Stream {
@@ -3229,20 +3250,23 @@ mod tests {
     mod moov_atom_builder {
         use super::{
             super::{MoovAtom, MoovAtomBuilder, ParseError, TrakAtom},
-            AtomBounds, AtomSize, AtomType, MvhdAtom, Size, TrakVideAtom, UdtaAtom,
+            AtomBounds, AtomSize, AtomType, MockStream, MvhdAtom, Size, TrakVideAtom, UdtaAtom,
             get_mock_mvhd_atom, get_mock_trak_vide_atom, get_mock_udta_atom,
         };
 
         #[test]
         fn build_fails_if_mvhd_is_missing() {
-            let builder = MoovAtom::builder()
+            let builder = MoovAtom::<MockStream>::builder()
                 .trak(TrakAtom::Vide(get_mock_trak_vide_atom(1024)))
                 .expect("Failed to add 'trak' atom to the MoovAtomBuilder");
 
-            let res = builder.build(AtomBounds {
-                position: 16,
-                size: AtomSize(Size::Standard(32784)),
-            });
+            let res = builder.build(
+                AtomBounds {
+                    position: 16,
+                    size: AtomSize(Size::Standard(32784)),
+                },
+                MockStream::new(),
+            );
 
             assert!(
                 matches!(res, Err(ParseError::MissingAtom(AtomType::Mvhd))),
@@ -3254,14 +3278,17 @@ mod tests {
 
         #[test]
         fn build_fails_if_trak_is_missing() {
-            let builder = MoovAtom::builder()
+            let builder = MoovAtom::<MockStream>::builder()
                 .mvhd(get_mock_mvhd_atom(2048))
                 .expect("Failed to add 'mvhd' atom to the MoovAtomBuilder");
 
-            let res = builder.build(AtomBounds {
-                position: 32,
-                size: AtomSize(Size::Standard(4096)),
-            });
+            let res = builder.build(
+                AtomBounds {
+                    position: 32,
+                    size: AtomSize(Size::Standard(4096)),
+                },
+                MockStream::new(),
+            );
 
             assert!(
                 matches!(res, Err(ParseError::MissingAtom(AtomType::Trak))),
@@ -3273,21 +3300,24 @@ mod tests {
 
         #[test]
         fn build_returns_valid_moov_atom_without_udta() {
-            let builder = MoovAtom::builder();
+            let builder = MoovAtom::<MockStream>::builder();
 
             let builder = builder
                 .mvhd(get_mock_mvhd_atom(64))
                 .and_then(|builder| builder.trak(TrakAtom::Vide(get_mock_trak_vide_atom(92))))
                 .expect("Failed to add child atoms to the MoovAtomBuilder");
 
-            let res = builder.build(AtomBounds {
-                position: 56,
-                size: AtomSize(Size::Standard(8192)),
-            });
+            let res = builder.build(
+                AtomBounds {
+                    position: 56,
+                    size: AtomSize(Size::Standard(8192)),
+                },
+                MockStream::new(),
+            );
 
             assert!(
                 matches!(
-                    res,
+                    &res,
                     Ok(MoovAtom {
                         mvhd: MvhdAtom::V0 { .. },
                         trak: TrakVideAtom { .. },
@@ -3296,6 +3326,7 @@ mod tests {
                             position: 56,
                             size: AtomSize(Size::Standard(8192)),
                         },
+                        _stream,
                     }),
                 ),
                 "MoovAtomBuilder::build() returned an invalid value.\nThe builder should return a \
@@ -3308,7 +3339,7 @@ mod tests {
 
         #[test]
         fn build_returns_valid_moov_atom_with_udta() {
-            let builder = MoovAtom::builder();
+            let builder = MoovAtom::<MockStream>::builder();
 
             let builder = builder
                 .mvhd(get_mock_mvhd_atom(256))
@@ -3316,14 +3347,17 @@ mod tests {
                 .and_then(|builder| builder.udta(get_mock_udta_atom(598)))
                 .expect("Failed to add child atoms to the MoovAtomBuilder");
 
-            let res = builder.build(AtomBounds {
-                position: 192,
-                size: AtomSize(Size::Standard(28456)),
-            });
+            let res = builder.build(
+                AtomBounds {
+                    position: 192,
+                    size: AtomSize(Size::Standard(28456)),
+                },
+                MockStream::new(),
+            );
 
             assert!(
                 matches!(
-                    res,
+                    &res,
                     Ok(MoovAtom {
                         mvhd: MvhdAtom::V0 { .. },
                         trak: TrakVideAtom { .. },
@@ -3332,6 +3366,7 @@ mod tests {
                             position: 192,
                             size: AtomSize(Size::Standard(28456)),
                         },
+                        _stream,
                     }),
                 ),
                 "MoovAtomBuilder::build() returned an invalid value.\nThe builder should return a \
@@ -3344,7 +3379,7 @@ mod tests {
 
         #[test]
         fn duplicate_udta_atoms_are_rejected() {
-            let builder = MoovAtom::builder();
+            let builder = MoovAtom::<MockStream>::builder();
 
             let builder = builder
                 .udta(get_mock_udta_atom(8192))
@@ -3362,7 +3397,7 @@ mod tests {
 
         #[test]
         fn duplicate_trak_atoms_are_rejected() {
-            let builder = MoovAtom::builder();
+            let builder = MoovAtom::<MockStream>::builder();
 
             let builder = builder
                 .trak(TrakAtom::Vide(get_mock_trak_vide_atom(768)))
@@ -3380,7 +3415,7 @@ mod tests {
 
         #[test]
         fn non_vide_trak_atoms_are_ignored() {
-            let builder = MoovAtom::builder();
+            let builder = MoovAtom::<MockStream>::builder();
 
             let builder = builder
                 .trak(TrakAtom::Other(AtomBounds {
@@ -3398,7 +3433,7 @@ mod tests {
 
         #[test]
         fn duplicate_mvhd_atoms_are_rejected() {
-            let builder = MoovAtom::builder();
+            let builder = MoovAtom::<MockStream>::builder();
 
             let builder = builder
                 .mvhd(get_mock_mvhd_atom(2304))
@@ -3418,7 +3453,7 @@ mod tests {
     mod moov_atom {
         use super::{
             super::MoovAtom, super::ParseError, AtomBounds, AtomHeader, AtomSize, AtomType,
-            MvhdAtom, Size, TestStream, TrakVideAtom, UdtaAtom, get_mock_mvhd_atom,
+            MockStream, MvhdAtom, Size, TestStream, TrakVideAtom, UdtaAtom, get_mock_mvhd_atom,
             get_mock_trak_vide_atom, with_duplicate_atom, without_atom,
         };
         use std::{io, time};
@@ -3433,6 +3468,7 @@ mod tests {
                 mvhd: get_mock_mvhd_atom(264),
                 trak: get_mock_trak_vide_atom(292),
                 udta: None,
+                _stream: MockStream::new(),
             };
 
             assert_eq!(
@@ -3452,6 +3488,7 @@ mod tests {
                 mvhd: get_mock_mvhd_atom(264),
                 trak: get_mock_trak_vide_atom(292),
                 udta: None,
+                _stream: MockStream::new(),
             };
 
             assert_eq!(
@@ -3647,7 +3684,7 @@ mod tests {
 
             assert!(
                 matches!(
-                    res,
+                    &res,
                     Ok(MoovAtom {
                         _bounds: AtomBounds {
                             position: 73,
@@ -3656,6 +3693,7 @@ mod tests {
                         mvhd: MvhdAtom::V0 { .. },
                         trak: TrakVideAtom { .. },
                         udta: Some(UdtaAtom { .. }),
+                        _stream,
                     })
                 ),
                 "Moov::parse_from_stream() returned an invalid value.\nThe parser should return a \
@@ -3697,7 +3735,7 @@ mod tests {
 
             assert!(
                 matches!(
-                    res,
+                    &res,
                     Ok(MoovAtom {
                         _bounds: AtomBounds {
                             position: 73,
@@ -3706,6 +3744,7 @@ mod tests {
                         mvhd: MvhdAtom::V0 { .. },
                         trak: TrakVideAtom { .. },
                         udta: None,
+                        _stream,
                     })
                 ),
                 "Moov::parse_from_stream() returned an invalid value.\nThe parser should return a \
